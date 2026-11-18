@@ -35,6 +35,7 @@ class TournamentsScreen extends StatefulWidget {
 
 class _TournamentsScreenState extends State<TournamentsScreen> {
   int _filterIndex = 0;
+  String _query = '';
 
   List<Match> _matches = [];
   List<Tournament> _tournaments = [];
@@ -197,16 +198,68 @@ class _TournamentsScreenState extends State<TournamentsScreen> {
   }
 
   List<Match> get _filteredMatches {
+    List<Match> list;
     switch (_filterIndex) {
       case 1:
-        return _matches.where((m) => m.isUpcoming).toList();
+        list = _matches.where((m) => m.isUpcoming).toList();
+        break;
       case 2:
-        return _matches.where((m) => m.isLive).toList();
+        list = _matches.where((m) => m.isLive).toList();
+        break;
       case 3:
-        return _matches.where((m) => m.isFinished).toList();
+        list = _matches.where((m) => m.isFinished).toList();
+        break;
       default:
-        return _matches;
+        list = _matches;
     }
+    final q = _query.trim().toLowerCase();
+    if (q.isEmpty) return list;
+    return list
+        .where((m) =>
+            m.opponentName.toLowerCase().contains(q) ||
+            m.teamName.toLowerCase().contains(q) ||
+            m.venue.toLowerCase().contains(q) ||
+            m.date.contains(q))
+        .toList();
+  }
+
+  /// 🔎 بحث في المباريات (اسم الفريق / الخصم / الملعب / التاريخ)
+  Future<void> _searchMatches() async {
+    final ctrl = TextEditingController(text: _query);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          backgroundColor: const Color(0xFF0F1B2D),
+          title: const Text('بحث في المباريات',
+              style: TextStyle(color: Colors.white, fontSize: 16)),
+          content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            style: const TextStyle(color: Colors.white),
+            textInputAction: TextInputAction.search,
+            onSubmitted: (v) => Navigator.pop(ctx, v),
+            decoration: const InputDecoration(
+              hintText: 'اسم الفريق أو الخصم أو الملعب أو التاريخ',
+              hintStyle: TextStyle(color: Colors.white38, fontSize: 12),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, ''),
+              child: const Text('مسح البحث'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text),
+              child: const Text('بحث'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (result == null || !mounted) return;
+    setState(() => _query = result.trim());
   }
 
   @override
@@ -246,6 +299,8 @@ class _TournamentsScreenState extends State<TournamentsScreen> {
                           onAddStanding: _addStanding,
                           onAddMatch: _addMatch,
                           onEditMatch: _editMatch,
+                          onSearch: _searchMatches,
+                          searchActive: _query.isNotEmpty,
                           onDeleteMatch: _deleteMatch,
                           onEditTournament: _editTournament,
                           onDeleteTournament: _deleteTournament,
@@ -303,6 +358,8 @@ class _TournamentsBody extends StatelessWidget {
   final VoidCallback onAddStanding;
   final VoidCallback onAddMatch;
   final ValueChanged<Match> onEditMatch;
+  final VoidCallback onSearch;
+  final bool searchActive;
   final ValueChanged<Match> onDeleteMatch;
   final ValueChanged<Tournament> onEditTournament;
   final ValueChanged<Tournament> onDeleteTournament;
@@ -320,6 +377,8 @@ class _TournamentsBody extends StatelessWidget {
     required this.onAddStanding,
     required this.onAddMatch,
     required this.onEditMatch,
+    required this.onSearch,
+    required this.searchActive,
     required this.onDeleteMatch,
     required this.onEditTournament,
     required this.onDeleteTournament,
@@ -339,14 +398,17 @@ class _TournamentsBody extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const _TopBar(),
+        _TopBar(onSearch: onSearch, active: searchActive),
         const SizedBox(height: 14),
 
         _TournamentsHero(stats: stats, matchesCount: matches.length),
         const SizedBox(height: 18),
 
         if (featured != null) ...[
-          _FeaturedMatch(match: featured),
+          _FeaturedMatch(
+            match: featured,
+            onEdit: canEdit ? () => onEditMatch(featured) : null,
+          ),
           const SizedBox(height: 20),
         ],
 
@@ -414,7 +476,9 @@ class _TournamentsBody extends StatelessWidget {
 // TOP BAR
 // ============================================================
 class _TopBar extends StatelessWidget {
-  const _TopBar();
+  final VoidCallback onSearch;
+  final bool active;
+  const _TopBar({required this.onSearch, this.active = false});
 
   @override
   Widget build(BuildContext context) {
@@ -497,10 +561,14 @@ class _TopBar extends StatelessWidget {
                   color: Colors.white.withOpacity(0.10),
                 ),
               ),
-              child: const Icon(
-                Icons.search_rounded,
-                color: AppColors.textPrimary,
-                size: 20,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: onSearch,
+                child: Icon(
+                  Icons.search_rounded,
+                  color: active ? AppColors.green : AppColors.textPrimary,
+                  size: 20,
+                ),
               ),
             ),
           ),
@@ -760,7 +828,8 @@ class _HeroStat extends StatelessWidget {
 // ============================================================
 class _FeaturedMatch extends StatelessWidget {
   final Match match;
-  const _FeaturedMatch({required this.match});
+  final VoidCallback? onEdit;
+  const _FeaturedMatch({required this.match, this.onEdit});
 
   @override
   Widget build(BuildContext context) {
@@ -896,7 +965,10 @@ class _FeaturedMatch extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 14),
-              Container(
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => _showMatchDetails(context, match, onEdit),
+                child: Container(
                 padding: const EdgeInsets.symmetric(vertical: 10),
                 decoration: BoxDecoration(
                   gradient: const LinearGradient(
@@ -931,6 +1003,7 @@ class _FeaturedMatch extends StatelessWidget {
                     ),
                   ],
                 ),
+              ),
               ),
             ],
           ),
@@ -3572,4 +3645,94 @@ class _DialogButtons extends StatelessWidget {
       ],
     );
   }
+}
+
+// ============================================================
+// MATCH DETAILS SHEET
+// ============================================================
+void _showMatchDetails(BuildContext context, Match m, VoidCallback? onEdit) {
+  final status = m.isFinished ? 'منتهية' : (m.isLive ? 'مباشر' : 'قادمة');
+  final hasScore = m.isFinished || m.isLive;
+
+  Widget row(IconData icon, String label, String value) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 7),
+        child: Row(
+          children: [
+            Icon(icon, color: AppColors.green, size: 18),
+            const SizedBox(width: 10),
+            Text(label,
+                style: const TextStyle(color: Colors.white60, fontSize: 13)),
+            const Spacer(),
+            Flexible(
+              child: Text(value.isEmpty ? '—' : value,
+                  textAlign: TextAlign.end,
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700)),
+            ),
+          ],
+        ),
+      );
+
+  showModalBottomSheet<void>(
+    context: context,
+    backgroundColor: const Color(0xFF0F1B2D),
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+    ),
+    builder: (ctx) => Directionality(
+      textDirection: TextDirection.rtl,
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 18, 20, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('${m.teamName}  ×  ${m.opponentName}',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 17,
+                      fontWeight: FontWeight.w800)),
+              const SizedBox(height: 8),
+              if (hasScore)
+                Text('${m.homeScore}  -  ${m.awayScore}',
+                    style: const TextStyle(
+                        color: AppColors.green,
+                        fontSize: 30,
+                        fontWeight: FontWeight.w900)),
+              const SizedBox(height: 8),
+              row(Icons.flag_rounded, 'الحالة', status),
+              row(Icons.calendar_month_rounded, 'التاريخ', m.date),
+              row(Icons.schedule_rounded, 'الوقت', m.time),
+              row(Icons.stadium_rounded, 'الملعب', m.venue),
+              if (m.isFinished && m.playerRating.isNotEmpty)
+                row(Icons.star_rounded, 'التقييم', m.playerRating),
+              const SizedBox(height: 12),
+              if (onEdit != null)
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      onEdit();
+                    },
+                    icon: const Icon(Icons.edit_rounded, size: 18),
+                    label: Text(m.isFinished
+                        ? 'تعديل النتيجة'
+                        : 'تسجيل النتيجة / تعديل المباراة'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.green,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
 }

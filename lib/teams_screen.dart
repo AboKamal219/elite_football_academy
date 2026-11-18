@@ -15,6 +15,7 @@ import 'models/app_user.dart';
 import 'models/match.dart';
 import 'models/player.dart';
 import 'models/team.dart';
+import 'player_detail_screen.dart';
 import 'services/auth_service.dart';
 import 'services/match_service.dart';
 import 'services/player_service.dart';
@@ -1026,6 +1027,7 @@ class _TeamsGrid extends StatelessWidget {
             team: filtered[i],
             playersCount: _playersCountForTeam(filtered[i].id),
             stats: _teamStats(filtered[i].id),
+            onTap: () => _showTeamPlayers(context, filtered[i]),
             onEdit: onEditTeam != null
                 ? () => onEditTeam!(filtered[i])
                 : null,
@@ -1044,6 +1046,7 @@ class _TeamCard extends StatelessWidget {
   final Team team;
   final int playersCount;
   final ({int wins, int total, double rate}) stats;
+  final VoidCallback? onTap;
   final VoidCallback? onEdit;
   final VoidCallback? onDelete;
 
@@ -1051,6 +1054,7 @@ class _TeamCard extends StatelessWidget {
     required this.team,
     required this.playersCount,
     required this.stats,
+    this.onTap,
     this.onEdit,
     this.onDelete,
   });
@@ -1060,7 +1064,10 @@ class _TeamCard extends StatelessWidget {
     final winRate = stats.rate;
     final matchesCount = stats.total;
 
-    return ClipRRect(
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: ClipRRect(
       borderRadius: BorderRadius.circular(20),
       child: BackdropFilter(
         filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
@@ -1303,6 +1310,7 @@ class _TeamCard extends StatelessWidget {
           ),
         ),
       ),
+    ),
     );
   }
 }
@@ -1613,4 +1621,153 @@ class _TopPlayerRow extends StatelessWidget {
       ),
     );
   }
+}
+
+// ============================================================
+// TEAM PLAYERS SHEET  (يظهر لما تدوس على كارد الفريق)
+// ============================================================
+void _showTeamPlayers(BuildContext context, Team team) {
+  showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: const Color(0xFF0F1B2D),
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+    ),
+    builder: (ctx) => Directionality(
+      textDirection: TextDirection.rtl,
+      child: DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.65,
+        minChildSize: 0.35,
+        maxChildSize: 0.92,
+        builder: (_, scroll) => Column(
+          children: [
+            const SizedBox(height: 10),
+            Container(
+              width: 44,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.white24,
+                borderRadius: BorderRadius.circular(4),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 14, 20, 8),
+              child: Row(
+                children: [
+                  Icon(Icons.shield_rounded, color: team.color, size: 22),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'لاعبو ${team.name}',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 17,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: FutureBuilder<List<Player>>(
+                future: PlayerService.getPlayersByTeam(team.id),
+                builder: (context, snap) {
+                  if (snap.connectionState != ConnectionState.done) {
+                    return const Center(
+                      child: CircularProgressIndicator(color: AppColors.green),
+                    );
+                  }
+                  final players = snap.data ?? const <Player>[];
+                  if (players.isEmpty) {
+                    return const Center(
+                      child: Text(
+                        'مفيش لاعبين في الفريق ده لسه',
+                        style: TextStyle(color: Colors.white60),
+                      ),
+                    );
+                  }
+                  return ListView.separated(
+                    controller: scroll,
+                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+                    itemCount: players.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 8),
+                    itemBuilder: (_, i) {
+                      final p = players[i];
+                      return InkWell(
+                        borderRadius: BorderRadius.circular(14),
+                        onTap: () {
+                          Navigator.pop(ctx);
+                          Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => PlayerDetailScreen(player: p),
+                            ),
+                          );
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 12),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.05),
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(
+                                color: Colors.white.withOpacity(0.08)),
+                          ),
+                          child: Row(
+                            children: [
+                              CircleAvatar(
+                                radius: 18,
+                                backgroundColor:
+                                    team.color.withOpacity(0.25),
+                                child: Text(
+                                  '${i + 1}',
+                                  style: const TextStyle(
+                                      color: Colors.white, fontSize: 12),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.start,
+                                  children: [
+                                    Text(p.name,
+                                        style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w700)),
+                                    const SizedBox(height: 2),
+                                    Text(p.position,
+                                        style: const TextStyle(
+                                            color: Colors.white54,
+                                            fontSize: 11)),
+                                  ],
+                                ),
+                              ),
+                              const Icon(Icons.star_rounded,
+                                  color: AppColors.gold, size: 16),
+                              const SizedBox(width: 4),
+                              Text(p.rating,
+                                  style: const TextStyle(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.w700)),
+                              const SizedBox(width: 6),
+                              const Icon(Icons.chevron_left,
+                                  color: Colors.white38),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 }

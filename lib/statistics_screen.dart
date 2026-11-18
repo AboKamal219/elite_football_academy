@@ -1326,26 +1326,57 @@ class _TopCharts extends StatelessWidget {
   }
 }
 
-class _PerformanceChartCard extends StatelessWidget {
+class _PerformanceChartCard extends StatefulWidget {
   final List<Player> allPlayers;
   const _PerformanceChartCard({required this.allPlayers});
 
   @override
-  Widget build(BuildContext context) {
-    final avgRating = allPlayers.isEmpty
-        ? 0.0
-        : allPlayers.fold<double>(
-                0, (sum, p) => sum + (double.tryParse(p.rating) ?? 0)) /
-            allPlayers.length;
+  State<_PerformanceChartCard> createState() => _PerformanceChartCardState();
+}
 
-    // ✅ نعرض خط ثابت لو مفيش داتا كفاية
-    final values = [
-      avgRating.clamp(0.0, 10.0),
-      avgRating.clamp(0.0, 10.0),
-      avgRating.clamp(0.0, 10.0),
-      avgRating.clamp(0.0, 10.0),
-      avgRating.clamp(0.0, 10.0),
-    ];
+class _PerformanceChartCardState extends State<_PerformanceChartCard> {
+  bool _loading = true;
+  List<double> _values = [];
+  List<String> _labels = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  /// ✅ بيانات حقيقية: متوسط تقييم المباريات المنتهية لكل يوم (آخر 6 أيام فيها مباريات).
+  /// قبل كده كان بيرسم خط ثابت بنفس الرقم (متوسط تقييم اللاعبين) مهما حصل.
+  Future<void> _load() async {
+    final matches = await MatchService.getAllMatches();
+    final byDate = <String, List<double>>{};
+    for (final m in matches) {
+      if (!m.isFinished) continue;
+      final r = double.tryParse(m.playerRating);
+      if (r == null || r <= 0) continue;
+      byDate.putIfAbsent(m.date, () => []).add(r);
+    }
+    final dates = byDate.keys.toList()..sort();
+    final last = dates.length > 6 ? dates.sublist(dates.length - 6) : dates;
+    final values = <double>[];
+    final labels = <String>[];
+    for (final d in last) {
+      final list = byDate[d]!;
+      values.add(list.reduce((x, y) => x + y) / list.length);
+      final parts = d.split('/');
+      labels.add(parts.length == 3 ? '${parts[2]}/${parts[1]}' : d);
+    }
+    if (!mounted) return;
+    setState(() {
+      _values = values;
+      _labels = labels;
+      _loading = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasChart = _values.length >= 2;
 
     return GlassCard(
       radius: 18,
@@ -1376,14 +1407,35 @@ class _PerformanceChartCard extends StatelessWidget {
           const SizedBox(height: 10),
           SizedBox(
             height: 235,
-            child: CustomPaint(
-              painter: _LineChartPainter(
-                values: values,
-                lastLabel: avgRating.toStringAsFixed(1),
-                labels: const ['—', '—', '—', '—', '—'],
-              ),
-              child: const SizedBox.expand(),
-            ),
+            child: _loading
+                ? const Center(
+                    child: CircularProgressIndicator(color: AppColors.green),
+                  )
+                : hasChart
+                    ? CustomPaint(
+                        painter: _LineChartPainter(
+                          values: _values
+                              .map((v) => v.clamp(5.0, 10.0).toDouble())
+                              .toList(),
+                          lastLabel: _values.last.toStringAsFixed(1),
+                          labels: _labels,
+                        ),
+                        child: const SizedBox.expand(),
+                      )
+                    : const Center(
+                        child: Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 12),
+                          child: Text(
+                            'الرسم هيظهر لما يكون فيه مباريات منتهية بتقييم في يومين مختلفين على الأقل (سجّل النتيجة والتقييم من شاشة المباريات)',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: AppColors.textSecondary,
+                              fontSize: 12,
+                              height: 1.7,
+                            ),
+                          ),
+                        ),
+                      ),
           ),
         ],
       ),

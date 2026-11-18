@@ -15,6 +15,8 @@ import 'academy_dashboard_screen.dart'
 import 'models/app_user.dart';
 import 'models/report.dart';
 import 'services/auth_service.dart';
+import 'package:flutter/services.dart';
+import 'services/report_builder.dart';
 import 'services/report_service.dart';
 
 // ============================================================
@@ -296,44 +298,6 @@ class _TopBar extends StatelessWidget {
           ),
           const SizedBox(width: 8),
         ],
-
-        ClipOval(
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-            child: Material(
-              color: AppColors.green.withOpacity(0.15),
-              shape: CircleBorder(
-                side: BorderSide(
-                  color: AppColors.green.withOpacity(0.4),
-                ),
-              ),
-              child: InkWell(
-                onTap: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                        'قريبًا: تصدير التقارير',
-                        style: TextStyle(fontFamily: 'Cairo'),
-                      ),
-                      backgroundColor: AppColors.orange,
-                      behavior: SnackBarBehavior.floating,
-                    ),
-                  );
-                },
-                customBorder: const CircleBorder(),
-                child: const SizedBox(
-                  width: 42,
-                  height: 42,
-                  child: Icon(
-                    Icons.ios_share_rounded,
-                    color: AppColors.green,
-                    size: 18,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
       ],
     );
   }
@@ -1034,28 +998,20 @@ class _ReportCard extends StatelessWidget {
                   children: [
                     Expanded(
                       child: _ActionButton(
-                        icon: Icons.download_rounded,
-                        label: 'تحميل',
+                        icon: Icons.visibility_rounded,
+                        label: 'عرض التقرير',
                         color: report.color,
-                        onTap: () => _showSnack(context, 'قريبًا: تحميل التقرير'),
+                        onTap: () => _openReport(context),
                       ),
                     ),
                     const SizedBox(width: 8),
                     Expanded(
                       child: _ActionButton(
-                        icon: Icons.ios_share_rounded,
-                        label: 'مشاركة',
+                        icon: Icons.copy_rounded,
+                        label: 'نسخ',
                         color: AppColors.green,
-                        onTap: () => _showSnack(context, 'قريبًا: مشاركة التقرير'),
+                        onTap: () => _copyReport(context),
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    _ActionButton(
-                      icon: Icons.visibility_rounded,
-                      label: '',
-                      color: AppColors.blue,
-                      isIconOnly: true,
-                      onTap: () => _showSnack(context, 'قريبًا: عرض التقرير'),
                     ),
                   ],
                 ),
@@ -1074,8 +1030,96 @@ class _ReportCard extends StatelessWidget {
           message,
           style: const TextStyle(fontFamily: 'Cairo'),
         ),
-        backgroundColor: AppColors.orange,
+        backgroundColor: AppColors.green,
         behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  /// 📋 ينسخ نص التقرير (الصقه في واتساب أو أي تطبيق)
+  Future<void> _copyReport(BuildContext context) async {
+    final text = await ReportBuilder.build(report);
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!context.mounted) return;
+    _showSnack(context, 'تم نسخ التقرير، الصقه في واتساب أو أي تطبيق');
+  }
+
+  /// 👁️ يعرض محتوى التقرير الحقيقي من بيانات الأكاديمية
+  Future<void> _openReport(BuildContext context) async {
+    final future = ReportBuilder.build(report);
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF0F1B2D),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.7,
+          minChildSize: 0.4,
+          maxChildSize: 0.95,
+          builder: (_, scroll) => FutureBuilder<String>(
+            future: future,
+            builder: (c, snap) {
+              if (snap.connectionState != ConnectionState.done) {
+                return const Center(
+                  child: CircularProgressIndicator(color: AppColors.green),
+                );
+              }
+              final text = snap.data ?? '';
+              return Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            report.title,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 17,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'نسخ',
+                          icon: const Icon(Icons.copy_rounded,
+                              color: AppColors.green),
+                          onPressed: () async {
+                            await Clipboard.setData(ClipboardData(text: text));
+                            if (ctx.mounted) {
+                              _showSnack(ctx, 'تم نسخ التقرير');
+                            }
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Divider(color: Colors.white12, height: 1),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      controller: scroll,
+                      padding: const EdgeInsets.all(20),
+                      child: SelectableText(
+                        text,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                          height: 1.9,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
       ),
     );
   }

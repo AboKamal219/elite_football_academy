@@ -1,7 +1,7 @@
 -- =====================================================================
--- FULL_SETUP.sql — 00_reset + 01_schema + 02_security_rpc in ONE script
+-- FULL_SETUP.sql — 00_reset + 01_schema + 02_security_rpc + 04_qr_attendance in ONE script
 -- Paste it in Supabase > SQL Editor > New query > Run.
--- ⚠️ It DELETES every old app table/function/policy first (see 00_reset.sql).
+-- ⚠️ It DELETES every table/function/policy in schema public first (see 00_reset.sql).
 -- Optional demo data: run 03_seed_demo.sql afterwards.
 -- =====================================================================
 
@@ -47,17 +47,10 @@ begin
     execute format('drop policy if exists %I on storage.objects', r.policyname);
   end loop;
 
-  -- 3) every table any version of the backend ever created
-  --    (CASCADE removes their policies, triggers, indexes, constraints)
-  for r in
-    select unnest(array[
-      'notification_reads','notification_receipts','player_bookmarks','match_events',
-      'audit_log','attendance','reports','standings','tournaments','matches','trainings',
-      'players','teams','coaches','guardians','subscriptions_payments','player_evaluations',
-      'academy_codes','users','academies'
-    ]) as t
+  -- 3) EVERY table in schema public (CASCADE removes policies, triggers, indexes, constraints)
+  for r in select tablename from pg_tables where schemaname = 'public'
   loop
-    execute format('drop table if exists public.%I cascade', r.t);
+    execute format('drop table if exists public.%I cascade', r.tablename);
   end loop;
 
   -- 4) every remaining function / procedure in schema public (not owned by an extension)
@@ -289,15 +282,22 @@ create table public.notification_reads (
 create index notification_reads_user_idx on public.notification_reads (user_id);
 
 -- ---------- attendance ----------------------------------------------
+-- training_id IS NULL  => whole-day row (what the attendance screen + QR scanner write).
+-- UNIQUE NULLS NOT DISTINCT (PostgreSQL 15+, the Supabase default) makes the
+-- upsert onConflict 'player_id,date,training_id' work even when training_id is NULL.
 create table public.attendance (
-  player_id  text not null,
-  team_id    text,
-  academy_id uuid not null references public.academies(id) on delete cascade,
-  date       date not null,
-  status     text not null check (status in ('present','absent','late')),
-  created_by uuid default auth.uid(),
-  created_at timestamptz not null default now(),
-  primary key (player_id, date)               -- required by upsert onConflict 'player_id,date'
+  id          bigint generated always as identity primary key,
+  player_id   text not null references public.players(id) on delete cascade,
+  team_id     text,                              -- filled by trg_attendance_check
+  academy_id  uuid not null references public.academies(id) on delete cascade,
+  date        date not null,
+  training_id text,
+  status      text not null check (status in ('present','absent','late')),
+  source      text not null default 'manual' check (source in ('manual','qr')),
+  checked_in_at timestamptz,
+  created_by  uuid default auth.uid(),
+  created_at  timestamptz not null default now(),
+  constraint attendance_uq unique nulls not distinct (player_id, date, training_id)
 );
 create index attendance_academy_date_idx on public.attendance (academy_id, date);
 
@@ -1038,4 +1038,141 @@ begin
 exception when others then
   raise notice 'Storage policies skipped (%). Add them in Dashboard > Storage > Policies.', sqlerrm;
 end $$;
+
+-- >>>>>>>>>>>>>>>>>>>> 04_qr_attendance.sql <<<<<<<<<<<<<<<<<<<<
+-- =====================================================================
+-- 04_qr_attendance.sql — QR check-in (signed token) + attendance trigger
+-- Run AFTER 02_security_rpc.sql (FULL_SETUP.sql already includes it).
+--
+-- Flow:
+--   player phone : issue_checkin_token(player_id)  -> "EFA.<player>.<exp>.<hmac>"  (shown as QR)
+--   coach phone  : scan_attendance(token, date)    -> verifies + records "present" in ONE call
+--                  returns {result: recorded | already, player_id, name, status}
+--   errors (exception message): invalid_token | token_expired | player_not_found | forbidden
+-- =====================================================================
+
+create extension if not exists pgcrypto with schema extensions;
+
+-- ---------------------------------------------------------------------
+-- 1) Secret used to sign tokens. RLS on + NO policy = no client can read it.
+-- ---------------------------------------------------------------------
+create table public.app_secrets (
+  key   text primary key,
+  value bytea not null
+);
+alter table public.app_secrets enable row level security;
+revoke all on public.app_secrets from anon, authenticated;
+
+insert into public.app_secrets (key, value)
+values ('checkin_hmac', extensions.gen_random_bytes(32));
+
+create or replace function public._checkin_sig(p_payload text)
+returns text language sql stable security definer set search_path = public, extensions as $$
+  select encode(
+    hmac(convert_to(p_payload, 'UTF8'),
+         (select value from public.app_secrets where key = 'checkin_hmac'),
+         'sha256'),
+    'hex')
+$$;
+revoke all on function public._checkin_sig(text) from public, anon, authenticated;
+
+-- ---------------------------------------------------------------------
+-- 2) Attendance trigger: team_id comes from the player row; the player must
+--    belong to the same academy as the row (nobody can mark foreign players).
+-- ---------------------------------------------------------------------
+create or replace function public.trg_attendance_check()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare v_team text; v_ac uuid;
+begin
+  select team_id, academy_id into v_team, v_ac from public.players where id = new.player_id;
+  if v_ac is null then raise exception 'player_not_found' using errcode = 'P0001'; end if;
+  if new.academy_id is not null and new.academy_id <> v_ac then
+    raise exception 'forbidden' using errcode = '42501';
+  end if;
+  new.academy_id := v_ac;
+  new.team_id    := v_team;
+  return new;
+end $$;
+
+create trigger trg_attendance_check before insert or update on public.attendance
+  for each row execute function public.trg_attendance_check();
+
+-- ---------------------------------------------------------------------
+-- 3) Issue a token (valid 10 minutes) — the player himself, or staff of the same academy
+-- ---------------------------------------------------------------------
+create or replace function public.issue_checkin_token(p_player text)
+returns text language plpgsql security definer set search_path = public as $$
+declare
+  v_ac  uuid;
+  v_exp bigint := extract(epoch from now())::bigint + 600;
+  v_pl  text   := btrim(coalesce(p_player, ''));
+begin
+  if auth.uid() is null then raise exception 'forbidden' using errcode = '42501'; end if;
+
+  select academy_id into v_ac from public.players where id = v_pl;
+  if v_ac is null then raise exception 'player_not_found' using errcode = 'P0001'; end if;
+  if v_ac is distinct from public.my_academy_id() then
+    raise exception 'forbidden' using errcode = '42501';
+  end if;
+  if not (public.is_staff() or public.my_player_id() = v_pl) then
+    raise exception 'forbidden' using errcode = '42501';
+  end if;
+
+  return 'EFA.' || v_pl || '.' || v_exp || '.' || public._checkin_sig(v_pl || '.' || v_exp);
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 4) Verify + record attendance (staff only). One round trip, instant DB write.
+-- ---------------------------------------------------------------------
+create or replace function public.scan_attendance(p_token text, p_date date default null)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+  m        text[];
+  v_pl     text;
+  v_exp    bigint;
+  v_ac     uuid;
+  v_name   text;
+  v_old    text;
+  v_date   date := coalesce(p_date, (now() at time zone 'utc')::date);
+begin
+  if auth.uid() is null or not public.is_staff() then
+    raise exception 'forbidden' using errcode = '42501';
+  end if;
+
+  m := regexp_match(btrim(coalesce(p_token, '')), '^EFA\.(.+)\.([0-9]+)\.([0-9a-f]{64})$');
+  if m is null then raise exception 'invalid_token' using errcode = 'P0001'; end if;
+  v_pl  := m[1];
+  v_exp := m[2]::bigint;
+
+  if public._checkin_sig(v_pl || '.' || v_exp) <> m[3] then
+    raise exception 'invalid_token' using errcode = 'P0001';
+  end if;
+  if v_exp < extract(epoch from now())::bigint then
+    raise exception 'token_expired' using errcode = 'P0001';
+  end if;
+
+  select academy_id, name into v_ac, v_name from public.players where id = v_pl;
+  if v_ac is null or v_ac is distinct from public.my_academy_id() then
+    raise exception 'player_not_found' using errcode = 'P0001';
+  end if;
+
+  select status into v_old from public.attendance
+   where player_id = v_pl and date = v_date and training_id is null;
+
+  if v_old in ('present', 'late') then
+    return jsonb_build_object('result', 'already', 'player_id', v_pl, 'name', v_name, 'status', v_old);
+  end if;
+
+  insert into public.attendance (player_id, academy_id, date, training_id, status, source, checked_in_at)
+  values (v_pl, v_ac, v_date, null, 'present', 'qr', now())
+  on conflict (player_id, date, training_id)
+  do update set status = 'present', source = 'qr', checked_in_at = now();
+
+  return jsonb_build_object('result', 'recorded', 'player_id', v_pl, 'name', v_name, 'status', 'present');
+end $$;
+
+revoke all on function public.issue_checkin_token(text)       from public, anon;
+revoke all on function public.scan_attendance(text, date)     from public, anon;
+grant execute on function public.issue_checkin_token(text)    to authenticated;
+grant execute on function public.scan_attendance(text, date)  to authenticated;
 

@@ -3,11 +3,14 @@
 import 'dart:ui';
 import 'package:flutter/material.dart' hide Text;
 import '../l10n/app_text.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:uuid/uuid.dart';
 import '../academy_dashboard_screen.dart' show AppColors, NetImage;
 import '../models/coach.dart';
 import '../services/auth_service.dart';
+import '../services/avatar_service.dart';
 import '../services/coach_service.dart';
+import '../services/supabase_service.dart';
 
 // ============================================================
 // COACH FORM DIALOG
@@ -35,6 +38,8 @@ class _CoachFormDialogState extends State<CoachFormDialog> {
   late final TextEditingController _nameCtrl;
   late final TextEditingController _yearsCtrl;
   late final TextEditingController _photoCtrl;
+  final ImagePicker _picker = ImagePicker();
+  bool _uploading = false;
   late final TextEditingController _phoneCtrl;
   late final TextEditingController _emailCtrl;
 
@@ -74,6 +79,46 @@ class _CoachFormDialogState extends State<CoachFormDialog> {
     _phoneCtrl.dispose();
     _emailCtrl.dispose();
     super.dispose();
+  }
+
+  /// 📷 اختيار صورة من الكاميرا أو المعرض ورفعها (بدل لصق رابط)
+  Future<void> _pickPhoto(ImageSource source) async {
+    try {
+      final picked = await _picker.pickImage(
+        source: source,
+        imageQuality: 75,
+        maxWidth: 600,
+      );
+      if (picked == null) return;
+      setState(() => _uploading = true);
+      final user = AuthService.currentUser;
+      final path = await AvatarService.upload(
+        picked: picked,
+        academyId: user?.academyId ?? '',
+        folder: 'coaches',
+        previousStored: _photoCtrl.text,
+      );
+      final url =
+          SupabaseService.client.storage.from('avatars').getPublicUrl(path);
+      if (!mounted) return;
+      setState(() {
+        _photoCtrl.text = url;
+        _uploading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _uploading = false);
+      final tooBig = '$e'.contains('image_too_large');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            tooBig ? 'الصورة كبيرة (الحد 2 ميجا)' : 'تعذّر رفع الصورة: $e',
+            style: const TextStyle(fontFamily: 'Cairo'),
+          ),
+          backgroundColor: AppColors.red,
+        ),
+      );
+    }
   }
 
   Future<void> _save() async {
@@ -229,15 +274,56 @@ class _CoachFormDialogState extends State<CoachFormDialog> {
 
                             _FieldLabel(
                               icon: Icons.image_rounded,
-                              text: 'رابط الصورة',
+                              text: 'صورة المدرب',
                             ),
                             const SizedBox(height: 6),
-                            _TextField(
-                              controller: _photoCtrl,
-                              hint: 'https://...',
-                              keyboardType: TextInputType.url,
-                              onChanged: (_) => setState(() {}),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: OutlinedButton.icon(
+                                    onPressed: _uploading
+                                        ? null
+                                        : () => _pickPhoto(ImageSource.camera),
+                                    icon: const Icon(Icons.photo_camera_rounded,
+                                        size: 18),
+                                    label: const Text('الكاميرا'),
+                                    style: OutlinedButton.styleFrom(
+                                      foregroundColor: Colors.white,
+                                      side: const BorderSide(
+                                          color: Colors.white24),
+                                      padding: const EdgeInsets.symmetric(
+                                          vertical: 12),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: OutlinedButton.icon(
+                                    onPressed: _uploading
+                                        ? null
+                                        : () => _pickPhoto(ImageSource.gallery),
+                                    icon: const Icon(
+                                        Icons.photo_library_rounded,
+                                        size: 18),
+                                    label: const Text('المعرض'),
+                                    style: OutlinedButton.styleFrom(
+                                      foregroundColor: Colors.white,
+                                      side: const BorderSide(
+                                          color: Colors.white24),
+                                      padding: const EdgeInsets.symmetric(
+                                          vertical: 12),
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ),
+                            if (_uploading) ...[
+                              const SizedBox(height: 8),
+                              const LinearProgressIndicator(
+                                color: AppColors.green,
+                                backgroundColor: Colors.white12,
+                              ),
+                            ],
                             const SizedBox(height: 14),
 
                             _FieldLabel(

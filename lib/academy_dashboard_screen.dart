@@ -17,6 +17,7 @@ import 'services/attendance_service.dart';
 import 'services/auth_service.dart';
 import 'services/coach_service.dart';
 import 'services/match_service.dart';
+import 'models/training.dart';
 import 'services/player_service.dart';
 import 'services/team_service.dart';
 import 'services/training_service.dart';
@@ -637,12 +638,15 @@ class _StatsGridState extends State<_StatsGrid> {
         final teams = await TeamService.getAllTeams();
         final coaches = await CoachService.getAllCoaches();
         final players = await PlayerService.getAllPlayers();
+        // ✅ بدل "الإيرادات" (مكانش ليها جدول بيانات وكانت صفر دايماً)
+        final allMatches = await MatchService.getAllMatches();
+        final upcomingAll =
+            allMatches.where((m) => m.isUpcoming || m.isLive).length;
         items = [
           _StatItem(Icons.shield_rounded, AppColors.blue, '${teams.length}', 'الفرق', ''),
           _StatItem(Icons.person_add_alt, AppColors.green, '${coaches.length}', 'المدربين', ''),
           _StatItem(Icons.groups, AppColors.purple, '${players.length}', 'اللاعبين', ''),
-          // ⚠️ الإيرادات: محتاج جدول payments في الداتابيز عشان تبقى حقيقية
-          _StatItem(Icons.attach_money, AppColors.gold, '0', 'الإيرادات', ''),
+          _StatItem(Icons.emoji_events, AppColors.orange, '$upcomingAll', 'مباريات قادمة', ''),
         ];
         break;
 
@@ -655,10 +659,25 @@ class _StatsGridState extends State<_StatsGrid> {
             : myPlayers.fold<double>(
                     0, (s, p) => s + (double.tryParse(p.rating) ?? 0)) /
                 myPlayers.length;
+        // ✅ أرقام حقيقية من قاعدة البيانات (كانت '0' ثابتة)
+        final teamId = user.teamId ?? '';
+        final now = DateTime.now();
+        final today = DateTime(now.year, now.month, now.day);
+        final weekEnd = today.add(const Duration(days: 7));
+        final trainings = teamId.isEmpty
+            ? <Training>[]
+            : await TrainingService.getTrainingsByTeam(teamId);
+        final weekTrainings = trainings.where((t) {
+          final d = DateTime(t.date.year, t.date.month, t.date.day);
+          return !d.isBefore(today) && d.isBefore(weekEnd);
+        }).length;
+        final upcomingMatches = teamId.isEmpty
+            ? 0
+            : (await MatchService.getUpcomingMatches(teamId)).length;
         items = [
           _StatItem(Icons.groups, AppColors.blue, '${myPlayers.length}', 'لاعبين فريقي', ''),
-          _StatItem(Icons.calendar_month, AppColors.purple, '0', 'تدريبات الأسبوع', ''),
-          _StatItem(Icons.emoji_events, AppColors.orange, '0', 'مباريات قادمة', ''),
+          _StatItem(Icons.calendar_month, AppColors.purple, '$weekTrainings', 'تدريبات الأسبوع', ''),
+          _StatItem(Icons.emoji_events, AppColors.orange, '$upcomingMatches', 'مباريات قادمة', ''),
           _StatItem(Icons.star, AppColors.gold, avgRating.toStringAsFixed(1), 'متوسط التقييم', ''),
         ];
         break;
