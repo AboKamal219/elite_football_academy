@@ -12,6 +12,7 @@ import 'academy_dashboard_screen.dart'
         NetImage,
         DeviceType,
         deviceTypeOf;
+import 'lineup_screen.dart';
 import 'models/app_user.dart';
 import 'models/match.dart';
 import 'models/standing.dart';
@@ -1331,7 +1332,10 @@ class _MatchCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ClipRRect(
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => _showMatchDetails(context, match, onEdit),
+      child: ClipRRect(
       borderRadius: BorderRadius.circular(18),
       child: BackdropFilter(
         filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
@@ -1497,6 +1501,7 @@ class _MatchCard extends StatelessWidget {
           ),
         ),
       ),
+    ),
     );
   }
 }
@@ -3710,6 +3715,30 @@ void _showMatchDetails(BuildContext context, Match m, VoidCallback? onEdit) {
               if (m.isFinished && m.playerRating.isNotEmpty)
                 row(Icons.star_rounded, 'التقييم', m.playerRating),
               const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    final role = AuthService.currentUser?.role;
+                    final staff =
+                        role == UserRole.admin || role == UserRole.coach;
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => LineupScreen(match: m, canEdit: staff),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.groups_rounded, size: 18),
+                  label: const Text('التشكيلة والبدلاء'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    side: const BorderSide(color: Colors.white24),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
               if (onEdit != null)
                 SizedBox(
                   width: double.infinity,

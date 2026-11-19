@@ -1,8 +1,17 @@
 -- =====================================================================
--- FULL_SETUP.sql — 00_reset + 01_schema + 02_security_rpc + 04_qr_attendance in ONE script
--- Paste it in Supabase > SQL Editor > New query > Run.
--- ⚠️ It DELETES every table/function/policy in schema public first (see 00_reset.sql).
--- Optional demo data: run 03_seed_demo.sql afterwards.
+-- FULL_SETUP.sql — قاعدة بيانات أكاديمية النخبة كاملة في ملف واحد
+--
+--   00_reset         : يمسح كل جداول ودوال وسياسات schema public
+--   01_schema        : الجداول (الحضور فيه training_id) 
+--   02_security_rpc  : الأمان (RLS) + دوال التسجيل والأكواد
+--   04_qr_attendance : مسح الـ QR وتسجيل الحضور
+--   08_lineups       : تشكيلة المباراة (أساسيين + بدلاء)
+--   09_admin_wipe    : دالة المسح الشامل (تُستدعى من tool/wipe_all.dart بمفتاح service_role فقط)
+--   05_grants        : صلاحيات الجداول للتطبيق
+--
+-- طريقة التشغيل: Supabase > SQL Editor > New query > الصق الملف كله > Run
+-- ⚠️ بيمسح كل بيانات التطبيق (مش حسابات Authentication).
+-- بيانات تجريبية (اختياري): 06_seed_test_accounts.sql  |  مسح كل شيء: 07_wipe_all_data.sql
 -- =====================================================================
 
 -- >>>>>>>>>>>>>>>>>>>> 00_reset.sql <<<<<<<<<<<<<<<<<<<<
@@ -1175,4 +1184,152 @@ revoke all on function public.issue_checkin_token(text)       from public, anon;
 revoke all on function public.scan_attendance(text, date)     from public, anon;
 grant execute on function public.issue_checkin_token(text)    to authenticated;
 grant execute on function public.scan_attendance(text, date)  to authenticated;
+
+-- >>>>>>>>>>>>>>>>>>>> 08_lineups.sql <<<<<<<<<<<<<<<<<<<<
+-- =====================================================================
+-- 08_lineups.sql — match line-ups (starters + substitutes)
+-- Safe to run on its own on an existing database (no data is touched) and
+-- safe to run twice. FULL_SETUP.sql already includes it.
+--
+--   role       : 'starter' (يلعب) | 'sub' (بديل)
+--   sort_order : ترتيب اللاعب داخل القائمة
+--   squad_size : عدد الأساسيين اللي المدرب حدّده للماتش (مكرر في كل صف)
+-- Staff (admin + coach) edit; every member of the academy can read.
+-- =====================================================================
+
+create table if not exists public.match_lineups (
+  match_id    text not null references public.matches(id) on delete cascade,
+  player_id   text not null references public.players(id) on delete cascade,
+  academy_id  uuid not null references public.academies(id) on delete cascade,
+  role        text not null check (role in ('starter', 'sub')),
+  sort_order  int  not null default 0,
+  squad_size  int  not null default 11 check (squad_size between 1 and 30),
+  created_at  timestamptz not null default now(),
+  primary key (match_id, player_id)
+);
+create index if not exists match_lineups_academy_idx on public.match_lineups (academy_id);
+
+alter table public.match_lineups enable row level security;
+
+drop policy if exists match_lineups_select on public.match_lineups;
+drop policy if exists match_lineups_insert on public.match_lineups;
+drop policy if exists match_lineups_update on public.match_lineups;
+drop policy if exists match_lineups_delete on public.match_lineups;
+
+create policy match_lineups_select on public.match_lineups for select to authenticated
+  using (academy_id = (select public.my_academy_id()));
+create policy match_lineups_insert on public.match_lineups for insert to authenticated
+  with check (academy_id = (select public.my_academy_id()) and (select public.is_staff()));
+create policy match_lineups_update on public.match_lineups for update to authenticated
+  using (academy_id = (select public.my_academy_id()) and (select public.is_staff()))
+  with check (academy_id = (select public.my_academy_id()));
+create policy match_lineups_delete on public.match_lineups for delete to authenticated
+  using (academy_id = (select public.my_academy_id()) and (select public.is_staff()));
+
+-- academy_id always comes from the signed-in user (same rule as every other table)
+drop trigger if exists trg_match_lineups_academy on public.match_lineups;
+create trigger trg_match_lineups_academy before insert or update on public.match_lineups
+  for each row execute function public.trg_set_academy_id();
+
+-- the match and the player must belong to the same academy (a player of ANOTHER team
+-- of the same academy is allowed on purpose: coaches borrow players between teams)
+create or replace function public.trg_match_lineups_check()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if not exists (
+    select 1 from public.matches m
+      join public.players p on p.academy_id = m.academy_id
+     where m.id = new.match_id and p.id = new.player_id
+  ) then
+    raise exception 'invalid_lineup' using errcode = 'P0001';
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists trg_match_lineups_check on public.match_lineups;
+create trigger trg_match_lineups_check before insert or update on public.match_lineups
+  for each row execute function public.trg_match_lineups_check();
+
+grant select, insert, update, delete on public.match_lineups to authenticated;
+grant all on public.match_lineups to service_role;
+notify pgrst, 'reload schema';
+
+-- >>>>>>>>>>>>>>>>>>>> 09_admin_wipe_function.sql <<<<<<<<<<<<<<<<<<<<
+-- =====================================================================
+-- 09_admin_wipe_function.sql — one-call "wipe everything" function
+--
+-- Used by tool/wipe_all.dart. Callable ONLY with the service_role key
+-- (anon / authenticated users — i.e. the app — can NOT run it).
+-- It deletes: every row of every public table (except the QR secret),
+--             every login account (auth.users), the old login audit log,
+-- and rotates the QR signing key.
+-- Storage files are deleted by the script (SQL is not allowed to do that).
+--
+-- After launch you may remove it:  drop function public.admin_wipe_all();
+-- =====================================================================
+create or replace function public.admin_wipe_all()
+returns text
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare r record;
+begin
+  for r in select tablename from pg_tables
+            where schemaname = 'public' and tablename <> 'app_secrets'
+  loop
+    execute format('truncate table public.%I restart identity cascade', r.tablename);
+  end loop;
+
+  delete from auth.users;
+
+  begin
+    execute 'truncate table auth.audit_log_entries';
+  exception when others then
+    null;  -- not allowed on some projects: harmless
+  end;
+
+  update public.app_secrets
+     set value = extensions.gen_random_bytes(32)
+   where key = 'checkin_hmac';
+
+  return 'ok';
+end $$;
+
+revoke all on function public.admin_wipe_all() from public, anon, authenticated;
+grant execute on function public.admin_wipe_all() to service_role;
+notify pgrst, 'reload schema';
+
+-- >>>>>>>>>>>>>>>>>>>> 05_grants.sql <<<<<<<<<<<<<<<<<<<<
+-- =====================================================================
+-- 05_grants.sql — table-level privileges for the Data API (PostgREST)
+-- Without these every client query fails with:
+--   42501 permission denied for table ...   (RLS only filters rows; the role
+--   still needs GRANTs on the table itself).
+-- Safe to run on its own at any time (no data is touched).
+-- =====================================================================
+
+grant usage on schema public to anon, authenticated;
+
+grant select, insert, update, delete on all tables in schema public to authenticated;
+grant usage, select on all sequences in schema public to authenticated;
+grant all on all tables in schema public to service_role;
+grant all on all sequences in schema public to service_role;
+
+-- future tables get the same grants
+alter default privileges in schema public
+  grant select, insert, update, delete on tables to authenticated;
+alter default privileges in schema public
+  grant usage, select on sequences to authenticated;
+
+-- never exposed to the client (RLS also blocks them, this is a second lock)
+revoke all on all tables in schema public from anon;
+do $$
+begin
+  revoke all on public.academy_codes from anon, authenticated;
+  revoke all on public.app_secrets   from anon, authenticated;
+exception when undefined_table then null;
+end $$;
+
+notify pgrst, 'reload schema';
 
